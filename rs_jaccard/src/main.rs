@@ -46,6 +46,10 @@ enum Commands {
         /// Query index
         #[arg(long, default_value = "0")]
         query_idx: usize,
+
+        /// Use SIMD optimization
+        #[arg(long)]
+        simd: bool,
     },
     
     /// Calculate distances using GAMBIT signature files
@@ -60,6 +64,9 @@ enum Commands {
         method: String,
         #[arg(short, long)]
         threads: Option<usize>,
+        /// Use SIMD optimization
+        #[arg(long)]
+        simd: bool,
     },
     
     /// Calculate full distance matrix
@@ -79,6 +86,10 @@ enum Commands {
         /// Number of threads (default: all cores)
         #[arg(short, long)]
         threads: Option<usize>,
+
+        /// Use SIMD optimization
+        #[arg(long)]
+        simd: bool,
     },
     
     /// Calculate matrix from GAMBIT signature file
@@ -97,6 +108,9 @@ enum Commands {
         first_n: Option<usize>,
         #[arg(short, long)]
         threads: Option<usize>,
+        /// Use SIMD optimization
+        #[arg(long)]
+        simd: bool,
     },
     
     /// Inspect GAMBIT signature file
@@ -172,7 +186,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     match &cli.command {
-        Commands::Query { query, reference, bounds, output, threads, query_idx } => {
+        Commands::Query { query, reference, bounds, output, threads, query_idx, simd } => {
             if let Some(t) = threads {
                 rayon::ThreadPoolBuilder::new().num_threads(*t).build_global()?;
             }
@@ -185,16 +199,22 @@ fn main() -> Result<()> {
             println!("Computing distances for {} reference sets...", ref_bounds.len() - 1);
             let start = std::time::Instant::now();
             
-            let distances = jaccard_distances_parallel(&query_coords, &ref_coords, &ref_bounds);
+            let distances = if *simd {
+                println!("Using SIMD-optimized implementation");
+                jaccard_distance_matrix_between_simd(&query_coords, &ref_bounds, &ref_coords, &ref_bounds)
+            } else {
+                println!("Using standard implementation");
+                jaccard_distance_matrix_query_vs_ref(&query_coords, &ref_bounds, &ref_coords, &ref_bounds)?
+            };
             
             let elapsed = start.elapsed();
             println!("Computed {} distances in {:.2?}", distances.len(), elapsed);
             
-            save_distances(&distances, &output)?;
+            save_matrix_csv(&distances, &output)?;
             println!("Results saved to {}", output.display());
         },
         
-        Commands::QuerySig { query_sig, ref_sig, output, method, threads } => {
+        Commands::QuerySig { query_sig, ref_sig, output, method, threads, simd } => {
             if let Some(t) = threads {
                 rayon::ThreadPoolBuilder::new().num_threads(*t).build_global()?;
             }
@@ -214,10 +234,15 @@ fn main() -> Result<()> {
             
             match method.as_str() {
                 "rowwise" | "blocked" => {
-                    let matrix = match method.as_str() {
-                        "rowwise" => jaccard_distance_matrix_query_vs_ref(&query_coords, &query_bounds, &ref_coords, &ref_bounds)?,
-                        "blocked" => jaccard_distance_matrix_query_vs_ref_blocked(&query_coords, &query_bounds, &ref_coords, &ref_bounds, 256)?,
-                        _ => unreachable!(),
+                    let matrix = if *simd {
+                        println!("Using SIMD-optimized implementation");
+                        jaccard_distance_matrix_between_simd(&query_coords, &query_bounds, &ref_coords, &ref_bounds)
+                    } else {
+                        match method.as_str() {
+                            "rowwise" => jaccard_distance_matrix_query_vs_ref(&query_coords, &query_bounds, &ref_coords, &ref_bounds)?,
+                            "blocked" => jaccard_distance_matrix_query_vs_ref_blocked(&query_coords, &query_bounds, &ref_coords, &ref_bounds, 256)?,
+                            _ => unreachable!(),
+                        }
                     };
                     
                     println!("Writing matrix with query and reference IDs...");
@@ -234,7 +259,7 @@ fn main() -> Result<()> {
             }
         },
         
-        Commands::Matrix { signatures, output, symmetric, threads } => {
+        Commands::Matrix { signatures, output, symmetric, threads, simd } => {
             if let Some(t) = threads {
                 rayon::ThreadPoolBuilder::new().num_threads(*t).build_global()?;
             }
@@ -244,7 +269,10 @@ fn main() -> Result<()> {
             let (coords, bounds, ids) = load_signatures_for_jaccard(&sig_data)?;
             
             println!("Calculating distance matrix...");
-            let matrix = if *symmetric {
+            let matrix = if *simd {
+                println!("Using SIMD-optimized implementation");
+                jaccard_distance_matrix_simd(&coords, &bounds)
+            } else if *symmetric {
                 jaccard_distance_matrix_blocked(&coords, &bounds, 1000)
             } else {
                 let coords_vec = signatures_to_coords(&sig_data);
@@ -257,7 +285,7 @@ fn main() -> Result<()> {
             println!("Done! Matrix written to {}", output.display());
         },
         
-        Commands::MatrixSig { signatures, output, method, threads, first_n, .. } => {
+        Commands::MatrixSig { signatures, output, method, threads, first_n, simd, .. } => {
             if let Some(t) = threads {
                 rayon::ThreadPoolBuilder::new().num_threads(*t).build_global()?;
             }
@@ -279,9 +307,7 @@ fn main() -> Result<()> {
                     sub_bounds.push(sub_coords.len());
                 }
                 (sub_coords, sub_bounds, sub_ids)
-
             } else {
-                // Use all signatures if no subset is specified
                 println!("Using all {} signatures", sig_data.kmers.len());
                 let (coords, bounds, ids) = load_signatures_for_jaccard(&sig_data)?;
                 (coords, bounds, ids)
@@ -292,11 +318,16 @@ fn main() -> Result<()> {
             
             match method.as_str() {
                 "upper" | "rowwise" | "blocked" => {
-                    let matrix = match method.as_str() {
-                        "upper" => jaccard_distance_matrix_upper_triangle(&subset_coords, &subset_bounds),
-                        "rowwise" => jaccard_distance_matrix_rowwise(&subset_coords, &subset_bounds),
-                        "blocked" => jaccard_distance_matrix_blocked(&subset_coords, &subset_bounds, 256),
-                        _ => unreachable!(),
+                    let matrix = if *simd {
+                        println!("Using SIMD-optimized implementation");
+                        jaccard_distance_matrix_simd(&subset_coords, &subset_bounds)
+                    } else {
+                        match method.as_str() {
+                            "upper" => jaccard_distance_matrix_upper_triangle(&subset_coords, &subset_bounds),
+                            "rowwise" => jaccard_distance_matrix_rowwise(&subset_coords, &subset_bounds),
+                            "blocked" => jaccard_distance_matrix_blocked(&subset_coords, &subset_bounds, 256),
+                            _ => unreachable!(),
+                        }
                     };
                     
                     println!("Writing matrix with sample IDs...");

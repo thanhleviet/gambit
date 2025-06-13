@@ -1,3 +1,4 @@
+use wide::*;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -8,6 +9,224 @@ use csv;
 pub type CoordType = u32;
 pub type BoundType = usize;
 pub type ScoreType = f32;
+
+/// SIMD-optimized Jaccard distance calculation using wide
+#[inline(always)]
+pub fn jaccard_distance_simd(coords1: &[CoordType], coords2: &[CoordType]) -> ScoreType {
+    if coords1.is_empty() && coords2.is_empty() {
+        return 0.0;
+    }
+    if coords1.is_empty() || coords2.is_empty() {
+        return 1.0;
+    }
+
+    let mut i = 0;
+    let mut j = 0;
+    let mut intersection = 0;
+
+    // Process elements in SIMD chunks
+    const LANES: usize = 8; // Using 8-wide SIMD for u32
+    type SimdType = u32x8;
+
+    while i + LANES <= coords1.len() && j + LANES <= coords2.len() {
+        // Create SIMD vectors using wide's API
+        let chunk1 = SimdType::new([
+            coords1[i], coords1[i + 1], coords1[i + 2], coords1[i + 3],
+            coords1[i + 4], coords1[i + 5], coords1[i + 6], coords1[i + 7]
+        ]);
+        let chunk2 = SimdType::new([
+            coords2[j], coords2[j + 1], coords2[j + 2], coords2[j + 3],
+            coords2[j + 4], coords2[j + 5], coords2[j + 6], coords2[j + 7]
+        ]);
+        
+        // Compare chunks using wide's SIMD operations
+        let mask = chunk1.cmp_eq(chunk2);
+        // Count matching elements by checking each lane
+        for k in 0..LANES {
+            if mask.to_array()[k] != 0 {
+                intersection += 1;
+            }
+        }
+        
+        // Move pointers based on comparison of first elements
+        let first1 = chunk1.to_array()[0];
+        let first2 = chunk2.to_array()[0];
+        if first1 < first2 {
+            i += LANES;
+        } else if first1 > first2 {
+            j += LANES;
+        } else {
+            i += LANES;
+            j += LANES;
+        }
+    }
+
+    // Handle remaining elements
+    while i < coords1.len() && j < coords2.len() {
+        match coords1[i].cmp(&coords2[j]) {
+            Ordering::Equal => {
+                intersection += 1;
+                i += 1;
+                j += 1;
+            }
+            Ordering::Less => i += 1,
+            Ordering::Greater => j += 1,
+        }
+    }
+
+    let union_size = coords1.len() + coords2.len() - intersection;
+    if union_size == 0 {
+        return 0.0;
+    }
+
+    1.0 - (intersection as f32 / union_size as f32)
+}
+
+/// SIMD-optimized matrix computation
+pub fn jaccard_distance_matrix_simd(
+    coords: &[CoordType],
+    bounds: &[BoundType],
+) -> Vec<Vec<ScoreType>> {
+    let n = bounds.len() - 1;
+    
+    println!("Computing {}x{} distance matrix using SIMD...", n, n);
+    let start_time = std::time::Instant::now();
+    
+    // Process rows in chunks to show progress
+    let chunk_size = 50;
+    let mut result = vec![vec![0.0; n]; n];
+    
+    for chunk_start in (0..n).step_by(chunk_size) {
+        let chunk_end = std::cmp::min(chunk_start + chunk_size, n);
+        
+        let chunk_results: Vec<(usize, Vec<ScoreType>)> = (chunk_start..chunk_end)
+            .into_par_iter()
+            .map(|i| {
+                let begin_i = bounds[i];
+                let end_i = bounds[i + 1];
+                let coords_i = &coords[begin_i..end_i];
+                
+                let mut row = vec![0.0; n];
+                
+                for j in 0..n {
+                    if i != j {
+                        let begin_j = bounds[j];
+                        let end_j = bounds[j + 1];
+                        let coords_j = &coords[begin_j..end_j];
+                        row[j] = jaccard_distance_simd(coords_i, coords_j);
+                    }
+                }
+                
+                (i, row)
+            })
+            .collect();
+        
+        for (i, row) in chunk_results {
+            result[i] = row;
+        }
+        
+        let elapsed = start_time.elapsed();
+        let progress = (chunk_end as f64 / n as f64) * 100.0;
+        let eta_seconds = if chunk_end > 0 {
+            (elapsed.as_secs_f64() / chunk_end as f64) * (n - chunk_end) as f64
+        } else {
+            0.0
+        };
+        
+        print!(
+            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {:.0}s ",
+            chunk_end, n, progress, elapsed, eta_seconds
+        );
+        stdout().flush().unwrap();
+    }
+    
+    println!(); // Move to the next line after the loop
+    println!("Matrix computation completed in {:?}", start_time.elapsed());
+    result
+}
+
+/// SIMD-optimized matrix computation between two sets
+pub fn jaccard_distance_matrix_between_simd(
+    query_coords: &[CoordType],
+    query_bounds: &[BoundType],
+    ref_coords: &[CoordType],
+    ref_bounds: &[BoundType],
+) -> Vec<Vec<ScoreType>> {
+    let n_queries = query_bounds.len() - 1;
+    let n_refs = ref_bounds.len() - 1;
+    
+    println!("Computing {}x{} distance matrix using SIMD...", n_queries, n_refs);
+    let start_time = std::time::Instant::now();
+    
+    // Process rows in chunks to show progress
+    let chunk_size = 50;
+    let mut result = vec![vec![0.0; n_refs]; n_queries];
+    
+    for chunk_start in (0..n_queries).step_by(chunk_size) {
+        let chunk_end = std::cmp::min(chunk_start + chunk_size, n_queries);
+        
+        let chunk_results: Vec<(usize, Vec<ScoreType>)> = (chunk_start..chunk_end)
+            .into_par_iter()
+            .map(|i| {
+                let begin_i = query_bounds[i];
+                let end_i = query_bounds[i + 1];
+                let coords_i = &query_coords[begin_i..end_i];
+                
+                let mut row = vec![0.0; n_refs];
+                
+                for j in 0..n_refs {
+                    let begin_j = ref_bounds[j];
+                    let end_j = ref_bounds[j + 1];
+                    let coords_j = &ref_coords[begin_j..end_j];
+                    row[j] = jaccard_distance_simd(coords_i, coords_j);
+                }
+                
+                (i, row)
+            })
+            .collect();
+        
+        for (i, row) in chunk_results {
+            result[i] = row;
+        }
+        
+        let elapsed = start_time.elapsed();
+        let progress = (chunk_end as f64 / n_queries as f64) * 100.0;
+        let eta_seconds = if chunk_end > 0 {
+            (elapsed.as_secs_f64() / chunk_end as f64) * (n_queries - chunk_end) as f64
+        } else {
+            0.0
+        };
+        
+        print!(
+            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {:.0}s ",
+            chunk_end, n_queries, progress, elapsed, eta_seconds
+        );
+        stdout().flush().unwrap();
+    }
+    
+    println!(); // Move to the next line after the loop
+    println!("Matrix computation completed in {:?}", start_time.elapsed());
+    result
+}
+
+/// SIMD-optimized parallel Jaccard distance calculation for one-vs-many
+pub fn jaccard_distances_parallel_simd(
+    query: &[CoordType],
+    all_coords: &[CoordType],
+    bounds: &[BoundType],
+) -> Vec<ScoreType> {
+    let n_references = bounds.len() - 1;
+    
+    (0..n_references)
+        .into_par_iter()
+        .map(|i| {
+            let start = bounds[i];
+            let end = bounds[i + 1];
+            let reference = &all_coords[start..end];
+            jaccard_distance_simd(query, reference)
+        })
+        .collect()
+}
 
 /// Core Jaccard distance calculation
 #[inline(always)]
