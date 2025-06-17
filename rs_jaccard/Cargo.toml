@@ -19,8 +19,8 @@ anyhow = "1.0"
 hdf5 = "0.8"
 ndarray = "0.15"
 wide = "0.7"
-parquet = "50.0.0"
-arrow = "50.0.0"
+parquet = "55.1.0"
+arrow = "55.1.0"
 
 [profile.release]
 lto = true

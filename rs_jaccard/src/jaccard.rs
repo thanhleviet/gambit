@@ -134,8 +134,8 @@ pub fn jaccard_distance_matrix_simd(
         };
         
         print!(
-            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {:.0}s ",
-            chunk_end, n, progress, elapsed, eta_seconds
+            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {} ",
+            chunk_end, n, progress, elapsed, format_duration(eta_seconds)
         );
         stdout().flush().unwrap();
     }
@@ -198,8 +198,8 @@ pub fn jaccard_distance_matrix_between_simd(
         };
         
         print!(
-            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {:.0}s ",
-            chunk_end, n_queries, progress, elapsed, eta_seconds
+            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {} ",
+            chunk_end, n_queries, progress, elapsed, format_duration(eta_seconds)
         );
         stdout().flush().unwrap();
     }
@@ -333,8 +333,8 @@ pub fn jaccard_distance_matrix_rowwise(
         };
         
         print!(
-            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {:.0}s ",
-            chunk_end, n, progress, elapsed, eta_seconds
+            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {} ",
+            chunk_end, n, progress, elapsed, format_duration(eta_seconds)
         );
         stdout().flush().unwrap();
     }
@@ -410,8 +410,8 @@ pub fn jaccard_distance_matrix_rowwise_stream(
         };
 
         print!(
-            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {:.0}s ",
-            chunk_end, n, progress, elapsed, eta_seconds
+            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {} ",
+            chunk_end, n, progress, elapsed, format_duration(eta_seconds)
         );
         stdout().flush().unwrap();
     }
@@ -467,8 +467,8 @@ pub fn jaccard_distance_matrix_upper_triangle(
         let progress = (pairs_completed as f64 / total_pairs as f64) * 100.0;
         
         print!(
-            "\rProgress: {}/{} pairs ({:.1}%) - Elapsed: {:?} - ETA: {:.0}s ",
-            pairs_completed, total_pairs, progress, elapsed, elapsed.as_secs_f64() / pairs_completed as f64 * (total_pairs - pairs_completed) as f64
+            "\rProgress: {}/{} pairs ({:.1}%) - Elapsed: {:?} - ETA: {} ",
+            pairs_completed, total_pairs, progress, elapsed, format_duration(elapsed.as_secs_f64() / pairs_completed as f64 * (total_pairs - pairs_completed) as f64)
         );
         stdout().flush().unwrap();
     }
@@ -542,8 +542,8 @@ pub fn jaccard_distance_matrix_blocked(
         };
 
         print!(
-            "\rProgress: block row {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {:.0}s ",
-            blocks_processed, num_blocks, progress, elapsed, eta_seconds
+            "\rProgress: block row {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {} ",
+            blocks_processed, num_blocks, progress, elapsed, format_duration(eta_seconds)
         );
         stdout().flush().unwrap();
     }
@@ -623,8 +623,8 @@ pub fn jaccard_distance_matrix_query_vs_ref(
         };
         
         print!(
-            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {:.0}s ",
-            chunk_end, n_queries, progress, elapsed, eta_seconds
+            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {} ",
+            chunk_end, n_queries, progress, elapsed, format_duration(eta_seconds)
         );
         stdout().flush().unwrap();
     }
@@ -698,8 +698,8 @@ pub fn jaccard_distance_matrix_query_vs_ref_blocked(
             };
             
             print!(
-                "\rProgress: block {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {:.0}s ",
-                blocks_processed, total_blocks, progress, elapsed, eta_seconds
+                "\rProgress: block {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {} ",
+                blocks_processed, total_blocks, progress, elapsed, format_duration(eta_seconds)
             );
             stdout().flush().unwrap();
         }
@@ -775,8 +775,8 @@ pub fn jaccard_distance_matrix_query_vs_ref_stream(
         };
         
         print!(
-            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {:.0}s ",
-            chunk_end, n_queries, progress, elapsed, eta_seconds
+            "\rProgress: {}/{} ({:.1}%) - Elapsed: {:?} - ETA: {} ",
+            chunk_end, n_queries, progress, elapsed, format_duration(eta_seconds)
         );
         stdout().flush().unwrap();
     }
@@ -850,6 +850,22 @@ pub fn precompute_similarity_candidates(
             }
         })
         .collect()
+}
+
+/// Format seconds into a human-readable duration string
+fn format_duration(seconds: f64) -> String {
+    if seconds < 60.0 {
+        format!("{:.0}s", seconds)
+    } else if seconds < 3600.0 {
+        let minutes = seconds / 60.0;
+        format!("{:.0}m", minutes)
+    } else if seconds < 86400.0 {
+        let hours = seconds / 3600.0;
+        format!("{:.1}h", hours)
+    } else {
+        let days = seconds / 86400.0;
+        format!("{:.1}d", days)
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,12 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use anyhow::{Result, Context};
+use arrow::array::{Float32Array, StringArray, ArrayRef};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
+use parquet::file::properties::WriterProperties;
+use std::sync::Arc;
 // use rayon::prelude::*;
 
 mod jaccard;
@@ -50,6 +56,10 @@ enum Commands {
         /// Use SIMD optimization
         #[arg(long)]
         simd: bool,
+
+        /// Output format (csv or parquet)
+        #[arg(long, default_value = "csv")]
+        format: String,
     },
     
     /// Calculate distances using GAMBIT signature files
@@ -186,7 +196,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     match &cli.command {
-        Commands::Query { query, reference, bounds, output, threads, query_idx, simd } => {
+        Commands::Query { query, reference, bounds, output, threads, query_idx, simd, format } => {
             if let Some(t) = threads {
                 rayon::ThreadPoolBuilder::new().num_threads(*t).build_global()?;
             }
@@ -210,7 +220,14 @@ fn main() -> Result<()> {
             let elapsed = start.elapsed();
             println!("Computed {} distances in {:.2?}", distances.len(), elapsed);
             
-            save_matrix_csv(&distances, &output)?;
+            match format.as_str() {
+                "csv" => save_matrix_csv(&distances, &output)?,
+                "parquet" => {
+                    let ids: Vec<String> = (0..distances.len()).map(|i| format!("sample_{}", i)).collect();
+                    save_matrix_parquet(&distances, &ids, &output)?;
+                },
+                _ => anyhow::bail!("Unknown format: '{}'. Use 'csv' or 'parquet'", format),
+            }
             println!("Results saved to {}", output.display());
         },
         
@@ -246,7 +263,11 @@ fn main() -> Result<()> {
                     };
                     
                     println!("Writing matrix with query and reference IDs...");
-                    save_query_ref_matrix_csv(&matrix, &query_ids, &ref_ids, output)?;
+                    if output.extension().map_or(false, |ext| ext == "parquet") {
+                        save_query_ref_matrix_parquet(&matrix, &query_ids, &ref_ids, output)?;
+                    } else {
+                        save_query_ref_matrix_csv(&matrix, &query_ids, &ref_ids, output)?;
+                    }
                     println!("Results saved to {}", output.display());
                 }
                 "rowwise-stream" => {
@@ -280,8 +301,11 @@ fn main() -> Result<()> {
             };
             
             println!("Writing matrix with IDs...");
-            save_matrix_csv_with_ids(&matrix, &ids, output)?;
-            
+            if output.extension().map_or(false, |ext| ext == "parquet") {
+                save_matrix_parquet(&matrix, &ids, output)?;
+            } else {
+                save_matrix_csv_with_ids(&matrix, &ids, output)?;
+            }
             println!("Done! Matrix written to {}", output.display());
         },
         
@@ -320,7 +344,7 @@ fn main() -> Result<()> {
                 "upper" | "rowwise" | "blocked" => {
                     let matrix = if *simd {
                         println!("Using SIMD-optimized implementation");
-                        jaccard_distance_matrix_simd(&subset_coords, &subset_bounds)
+                        jaccard_distance_matrix_between_simd(&subset_coords, &subset_bounds, &subset_coords, &subset_bounds)
                     } else {
                         match method.as_str() {
                             "upper" => jaccard_distance_matrix_upper_triangle(&subset_coords, &subset_bounds),
@@ -331,7 +355,11 @@ fn main() -> Result<()> {
                     };
                     
                     println!("Writing matrix with sample IDs...");
-                    save_matrix_csv_with_ids(&matrix, &subset_ids, output)?;
+                    if output.extension().map_or(false, |ext| ext == "parquet") {
+                        save_matrix_parquet(&matrix, &subset_ids, output)?;
+                    } else {
+                        save_matrix_csv_with_ids(&matrix, &subset_ids, output)?;
+                    }
                     println!("Matrix saved to {}", output.display());
                 }
                 "rowwise-stream" => {
@@ -660,5 +688,63 @@ fn save_query_ref_matrix_csv(matrix: &[Vec<f32>], query_ids: &[String], ref_ids:
     }
     
     writer.flush()?;
+    Ok(())
+}
+
+fn save_matrix_parquet(matrix: &[Vec<f32>], ids: &[String], path: &PathBuf) -> Result<()> {
+    let file = File::create(path)?;
+    
+    // Create schema
+    let mut fields = vec![Field::new("id", DataType::Utf8, false)];
+    for i in 0..matrix[0].len() {
+        fields.push(Field::new(format!("col_{}", i), DataType::Float32, false));
+    }
+    let schema = Arc::new(Schema::new(fields));
+    
+    // Create arrays for each column
+    let mut arrays: Vec<ArrayRef> = vec![Arc::new(StringArray::from(ids.to_vec()))];
+    for col in 0..matrix[0].len() {
+        let values: Vec<f32> = matrix.iter().map(|row| row[col]).collect();
+        arrays.push(Arc::new(Float32Array::from(values)));
+    }
+    
+    // Create record batch
+    let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+    
+    // Write to parquet
+    let props = WriterProperties::builder().build();
+    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+    writer.write(&batch)?;
+    writer.close()?;
+    
+    Ok(())
+}
+
+fn save_query_ref_matrix_parquet(matrix: &[Vec<f32>], query_ids: &[String], ref_ids: &[String], path: &PathBuf) -> Result<()> {
+    let file = File::create(path)?;
+    
+    // Create schema
+    let mut fields = vec![Field::new("query_id", DataType::Utf8, false)];
+    for id in ref_ids {
+        fields.push(Field::new(id.clone(), DataType::Float32, false));
+    }
+    let schema = Arc::new(Schema::new(fields));
+    
+    // Create arrays for each column
+    let mut arrays: Vec<ArrayRef> = vec![Arc::new(StringArray::from(query_ids.to_vec()))];
+    for col in 0..matrix[0].len() {
+        let values: Vec<f32> = matrix.iter().map(|row| row[col]).collect();
+        arrays.push(Arc::new(Float32Array::from(values)));
+    }
+    
+    // Create record batch
+    let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+    
+    // Write to parquet
+    let props = WriterProperties::builder().build();
+    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+    writer.write(&batch)?;
+    writer.close()?;
+    
     Ok(())
 }
